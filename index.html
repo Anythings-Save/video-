@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Secure Player</title>
+<style>
+body { display:flex; flex-direction:column; align-items:center; margin-top:40px; }
+#thumbnail { max-width:90vw; cursor:pointer; border:1px solid #000; }
+#overlay {
+  display:none; position:fixed; inset:0;
+  background:rgba(0,0,0,.85);
+  display:flex; justify-content:center; align-items:center;
+}
+canvas { border:1px solid #fff; }
+</style>
+</head>
+<body>
+
+<img id="thumbnail">
+<div id="overlay"><canvas id="cv"></canvas></div>
+
+<script type="module">
+const FPS = 24;
+const PRELOAD = 20;
+const TOTAL = 1566;
+
+const FRAME_PATH = 'public/encrypted_frames/';
+const AUDIO_FILE = 'public/encrypted_audio.img';
+const THUMB_FILE = 'public/thumbnail.jpg.img';
+
+const keyHex = (await (await fetch('key.txt')).text()).trim();
+const keyBytes = new Uint8Array(keyHex.match(/../g).map(h=>parseInt(h,16)));
+const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-CBC', false, ['decrypt']);
+
+async function decrypt(buf){
+  const b = new Uint8Array(buf);
+  return crypto.subtle.decrypt({name:'AES-CBC',iv:b.slice(0,16)}, cryptoKey, b.slice(16));
+}
+
+/* ---------- thumbnail ---------- */
+const thumb = document.getElementById('thumbnail');
+thumb.src = URL.createObjectURL(
+  new Blob([await decrypt(await (await fetch(THUMB_FILE)).arrayBuffer())], {type:'image/jpeg'})
+);
+
+/* ---------- canvas ---------- */
+const overlay = document.getElementById('overlay');
+const canvas = document.getElementById('cv');
+const ctx = canvas.getContext('2d');
+
+function resize(){
+  const w = innerWidth*0.9, h = innerHeight*0.9, a=16/9;
+  let cw=w, ch=w/a; if(ch>h){ch=h;cw=h*a;}
+  const dpr=devicePixelRatio||1;
+  canvas.width=cw*dpr; canvas.height=ch*dpr;
+  canvas.style.width=cw+'px'; canvas.style.height=ch+'px';
+}
+addEventListener('resize',resize);
+
+/* ---------- playback ---------- */
+let audioCtx,startTime=0,idx=0;
+let buffer=[],loading=0,playing=false;
+
+const frames = Array.from({length:TOTAL},(_,i)=>
+  FRAME_PATH+'frame'+String(i+1).padStart(3,'0')+'.jpg.img'
+);
+
+async function preload(){
+  while(playing && loading<frames.length){
+    if(buffer.length>=PRELOAD){ await new Promise(r=>setTimeout(r,10)); continue; }
+    const res = await fetch(frames[loading]);
+    buffer.push(await decrypt(await res.arrayBuffer()));
+    loading++;
+  }
+}
+
+async function play(){
+  playing=true;
+  audioCtx=new AudioContext();
+  const aud = await audioCtx.decodeAudioData(
+    await decrypt(await (await fetch(AUDIO_FILE)).arrayBuffer())
+  );
+  const src=audioCtx.createBufferSource();
+  src.buffer=aud; src.connect(audioCtx.destination); src.start();
+  startTime=audioCtx.currentTime;
+  preload(); draw();
+}
+
+async function draw(){
+  if(!playing) return;
+  const f = Math.floor((audioCtx.currentTime-startTime)*FPS);
+  if(f!==idx && buffer.length){
+    idx=f;
+    const bmp = await createImageBitmap(new Blob([buffer.shift()]));
+    ctx.drawImage(bmp,0,0,canvas.width,canvas.height);
+    bmp.close();
+  }
+  requestAnimationFrame(draw);
+}
+
+thumb.onclick=()=>{ overlay.style.display='flex'; resize(); play(); };
+overlay.onclick=()=>location.reload();
+</script>
+</body>
+</html>
